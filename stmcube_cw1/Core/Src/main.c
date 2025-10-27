@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include "nau7802.h"
 #include <string.h>
+#include <stdbool.h>
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -131,7 +132,7 @@ int main(void)
   HAL_UART_Transmit(&huart2, (uint8_t*)uartBuf, strlen(uartBuf), 100);
   HAL_Delay(3000); // wait 3 seconds for user
 
-  zeroOffset = NAU7802_getAverage(&hi2c1, 16, 1000); // average 16 readings
+  zeroOffset = NAU7802_getAverage(&hi2c1, 320, 1000); // average 320 readings (1 second)
   NAU7802_setZeroOffset(zeroOffset);
 
   sprintf(uartBuf, "Zero offset: %ld\r\n", zeroOffset);
@@ -176,6 +177,15 @@ int main(void)
 	  {
 		  // reset the outputBool
 		  outputBool = 0;
+
+		  /* GET ENCODER READINGS*/
+		  counterValue = TIM2->CNT;
+		  if (counterValue != pastCounterValue)
+		  {
+			  angleValue=(360.0/4000.0)*((float)counterValue);
+
+		  }
+		  pastCounterValue = counterValue;
 
 //		  float weight = NAU7802_getWeight(&hi2c1, false, 16, 1000); // 16 samples
 		  float weight = NAU7802_getReading(&hi2c1);
