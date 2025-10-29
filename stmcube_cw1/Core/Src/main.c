@@ -54,14 +54,24 @@ UART_HandleTypeDef huart2;
 /* USER CODE BEGIN PV */
 char uartBuf[64];
 int32_t zeroOffset = 0;
-float calFactor = 1.0f;
+double force_coeff = 8.76884498e-06;
+float force_bias = 3.92787482;			// calculated calibration factors
+float force_thing = 0.014112;
+static volatile float force = 0;
+static volatile float windSpeed_load = 0;
 
 uint8_t samplingRate = 200; 		// Sampling rate
 uint8_t outputBool = 0;				// Boolean to send the code over uart
+//float period = 1.0 / samplingRate;	// Period for calculating the angular velocity
 
 // ENCODER PV
-static volatile int32_t previousCount = 0;         // last count (wrap-safe with int32_t)
-float cup = 50;
+static volatile int32_t prevCount = 0;         // last count (wrap-safe with int32_t)
+static volatile int32_t latestCount = 0;
+static volatile int32_t latestDelta = 0;
+static volatile uint8_t sampleReady = 0;
+//static volatile uint8_t cpr = 4000;
+//static float encoder_coeff = 0.085843;
+
 
 
 /* USER CODE END PV */
@@ -74,11 +84,6 @@ static void MX_TIM2_Init(void);
 static void MX_I2C1_Init(void);
 static void MX_TIM3_Init(void);
 /* USER CODE BEGIN PFP */
-static inline int32_t getEncoderCount(void)
-{
-  return (int32_t)__HAL_TIM_GET_COUNTER(&htim2);
-}
-
 static inline void printUART(const char* s)
 {
   HAL_UART_Transmit(&huart2, (uint8_t*)s, (uint16_t)strlen(s), 50);
@@ -149,17 +154,21 @@ int main(void)
   sprintf(uartBuf, "Zero offset: %ld\r\n", zeroOffset);
   HAL_UART_Transmit(&huart2, (uint8_t*)uartBuf, strlen(uartBuf), 100);
 
-  // --- SCALE FACTOR CALIBRATION ---
-  sprintf(uartBuf, "Place known weight (1000g)...\r\n");
+  printf(uartBuf, "Place known weight (50g)...\r\n");
   HAL_UART_Transmit(&huart2, (uint8_t*)uartBuf, strlen(uartBuf), 100);
   HAL_Delay(5000); // wait 5 seconds for user
 
-  int32_t readingWithWeight = NAU7802_getAverage(&hi2c1, 16, 1000);
-  calFactor = (float)(readingWithWeight - zeroOffset) / 1.0f; // units per gram
-  NAU7802_setCalibrationFactor(calFactor);
+  // --- SCALE FACTOR CALIBRATION ---
+//  sprintf(uartBuf, "Place known weight (1000g)...\r\n");
+//  HAL_UART_Transmit(&huart2, (uint8_t*)uartBuf, strlen(uartBuf), 100);
+//  HAL_Delay(5000); // wait 5 seconds for user
+//
+//  int32_t readingWithWeight = NAU7802_getAverage(&hi2c1, 64 , 1000);
+//  calFactor = (float)(readingWithWeight - zeroOffset) / 1.0f; // units per gram
+//  NAU7802_setCalibrationFactor(calFactor);
 
-  sprintf(uartBuf, "Calibration done. Factor: %.3f units/g\r\n", calFactor);
-  HAL_UART_Transmit(&huart2, (uint8_t*)uartBuf, strlen(uartBuf), 100);
+//  sprintf(uartBuf, "Calibration done. Factor: %.3f units/g\r\n", calFactor);
+//  HAL_UART_Transmit(&huart2, (uint8_t*)uartBuf, strlen(uartBuf), 100);
 
   sprintf(uartBuf, "OUTPUT: Load Cell [g], Angular Velocity [deg/s]\n");
   HAL_UART_Transmit(&huart2, (uint8_t*)uartBuf, strlen(uartBuf), 100);
@@ -173,7 +182,6 @@ int main(void)
    // Zero and start the hardware encoder
    __HAL_TIM_SET_COUNTER(&htim2, 0);
    HAL_TIM_Encoder_Start(&htim2, TIM_CHANNEL_ALL);
-   previousCount = getEncoderCount();
 
 
    /*----------- OUTPUT TIMER INIT ----------- */
@@ -189,34 +197,16 @@ int main(void)
   while (1)
   {
 
-
-	  float weight = NAU7802_getReading(&hi2c1);
-
-
 	  // Output when outputBool set to TRUE
 	  if (outputBool == 1)
 	  {
 		  // reset the outputBool
 		  outputBool = 0;
 
-		  /* GET ENCODER READINGS*/
-//		  counterValue = TIM2->CNT;
-//		  if (counterValue != pastCounterValue)
-//		  {
-//			  angleValue=(360.0/4000.0)*((float)counterValue);
-//
-//		  }
-//		  pastCounterValue = counterValue;
+		  // Output the latest force and values from the  value
+		  sprintf(uartBuf, "%.4f, %ld \n", force, latestCount);
+		  HAL_UART_Transmit(&huart2, (uint8_t*)uartBuf, strlen(uartBuf), 50);
 
-		  int32_t currentCount = getEncoderCount();
-		  int32_t deltaCount = currentCount - previousCount;   // wrap-safe with signed math
-		  previousCount = currentCount;
-
-//		  float weight = NAU7802_getWeight(&hi2c1, false, 16, 1000); // 16 samples
-		  sprintf(uartBuf, "%.4f, %.4ld \n", weight, currentCount);
-		  HAL_UART_Transmit(&huart2, (uint8_t*)uartBuf, strlen(uartBuf), 100);
-
-		  cup = cup + 2;
 	  }
 
     /* USER CODE END WHILE */
@@ -478,6 +468,32 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
   /* Prevent unused argument(s) compilation warning */
   if (htim->Instance==TIM3) {
 	  outputBool = 1;
+
+	  // GET Load Cell readings
+	  float raw_adc = NAU7802_getReading(&hi2c1);
+	  // convert to force based on calibration factors
+	  force = force_coeff * raw_adc + force_bias;
+
+//	  windSpeed_load = (force / wind_coeff);
+
+	  if (windSpeed_load < 0.0f) {
+		  windSpeed_load = 0.0;
+	  }
+
+	  int32_t c = (int32_t)__HAL_TIM_GET_COUNTER(&htim2);
+	  int32_t d = c - prevCount;   							// wrap-safe with signed math
+//	  double angularVelocity = (d / period)/ cpr;			// Get the angular velocity
+
+	  // convert to linear velocity
+//	  windSpeed_enc = angularVelocity * encoder_coeff;
+
+	  prevCount = c;
+
+	  latestCount = c;
+	  latestDelta = d;
+	  sampleReady = 1;
+
+
   }
 }
 

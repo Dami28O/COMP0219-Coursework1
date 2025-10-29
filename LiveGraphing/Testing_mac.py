@@ -28,13 +28,15 @@ class SerialReader(QtCore.QThread):
             except Exception:
                 pass
             return
+        # Capture start time for relative timestamps
+        start_time = time.monotonic()
         with ser:
             while not self._stop:
                 try:
                     line = ser.readline().decode(errors="ignore").strip()
                     if not line:
                         # If we haven't seen data in a while and the device disappeared, treat as disconnect
-                        now = time.time()
+                        now = time.monotonic()
                         if (now - self._last_data_ts) > 2.0:
                             try:
                                 ports = [p.device for p in serial.tools.list_ports.comports() if "usbmodem" in p.device]
@@ -50,7 +52,8 @@ class SerialReader(QtCore.QThread):
                     parts = line.split(",")
                     value_str = parts[-1]
                     value = float(value_str)
-                    ts = time.time()
+                    # Use monotonic time for high-resolution, stable timestamps
+                    ts = time.monotonic()
                     self.data_received.emit(self._port_name, ts, value)
                     self._last_data_ts = ts
                 except ValueError:
@@ -112,7 +115,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.max_points = max_points
         self.buffers = {}
         self.curves = {}
-        self.t0 = time.time()
+        self.t0 = time.monotonic()  # Use monotonic clock for stable timing
         self.value_labels = {}
         self.port_to_reader = {}
         self.port_to_widget = {}
@@ -120,9 +123,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.max_speed = float(max_speed)
         self.min_speed = float(min_speed)
         self.port_to_name = {}
+        self.is_ground_truth_port = {}
         self.logging_active = False
-        self.log_rows = []
-        self.log_by_port = {}
+        self.log_rows_gt = []
+        self.log_rows_student = []
         # Error line state
         self.err_lower = {}
         self.err_upper = {}
@@ -173,7 +177,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self.value_labels[port] = value_label
             self.curves[port] = self.plot.plot(pen=pg.mkPen(color, width=2), name=label)
             self.port_to_name[port] = name
-            self.log_by_port.setdefault(port, [])
+            # Mark ground truth by name if provided, else fallback later
+            if isinstance(name, str) and name.strip().lower().startswith('ground truth'):
+                self.is_ground_truth_port[port] = True
+            else:
+                self.is_ground_truth_port.setdefault(port, False)
 
             # error lines for this device
             base_pen = self.curves[port].opts['pen']
@@ -199,6 +207,9 @@ class MainWindow(QtWidgets.QMainWindow):
             if self.ground_truth_port is None:
                 self.ground_truth_port = port
                 self.ground_truth_group = _modem_group(port)
+                # If not explicitly named, treat the first as ground truth
+                if not self.is_ground_truth_port.get(port, False):
+                    self.is_ground_truth_port[port] = True
             else:
                 # Any subsequent attached device at init is considered student
                 self.student_port = port
@@ -226,7 +237,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @QtCore.Slot(str, float, float)
     def on_data(self, port, ts, value):
-        t_rel = ts - self.t0
+        t_rel = ts - self.t0  # ts is already from monotonic clock
         # Clip incoming values to keep scale stable
         clipped = value
         try:
@@ -245,21 +256,30 @@ class MainWindow(QtWidgets.QMainWindow):
                 lbl.setText(f"{clipped:.3f} m/s")
             except Exception:
                 pass
-        # Logging rows: ISO time, epoch, t_rel, device_name, port, raw, clipped, expected_error_pct
+        # Logging rows: ISO time, epoch, t_rel, device_name, port, raw, clipped, expected_error_pct, cov_lower_mps, cov_upper_mps
         if self.logging_active:
             try:
-                iso = time.strftime('%Y-%m-%dT%H:%M:%S', time.localtime(ts)) + f".{int((ts%1)*1000):03d}Z"
+                # Convert monotonic time to wall clock time for ISO timestamp
+                wall_time = time.time()
+                iso = time.strftime('%Y-%m-%dT%H:%M:%S', time.localtime(wall_time)) + f".{int((wall_time%1)*1000):03d}Z"
                 rho = float(getattr(self, 'air_density', 1.204))
                 dp = float(getattr(self, 'dp_error_pa', 0.62))
                 vabs = abs(float(clipped))
                 # Only compute error for ground truth device
-                is_gt = (_modem_group(port) == getattr(self, 'ground_truth_group', None))
+                # Prefer explicit marking by name; fallback to group match
+                is_gt = bool(self.is_ground_truth_port.get(port, False)) or (_modem_group(port) == getattr(self, 'ground_truth_group', None))
                 if is_gt and vabs > 1e-12:
                     dv_abs = dp / (rho * vabs)
                     err_pct = (dv_abs / vabs) * 100.0
                     err_pct_str = f"{err_pct:.3f}"
+                    cov_lo = max(self.min_speed if not getattr(self, 'y_log', False) else max(self.min_speed, 1e-6), float(clipped) - dv_abs)
+                    cov_hi = float(clipped) + dv_abs
+                    cov_lo_str = f"{cov_lo:.6f}"
+                    cov_hi_str = f"{cov_hi:.6f}"
                 else:
                     err_pct_str = ''
+                    cov_lo_str = ''
+                    cov_hi_str = ''
                 row = [
                     iso,
                     f"{ts:.6f}",
@@ -269,9 +289,13 @@ class MainWindow(QtWidgets.QMainWindow):
                     f"{float(value):.6f}",
                     f"{float(clipped):.6f}",
                     err_pct_str,
+                    cov_lo_str,
+                    cov_hi_str,
                 ]
-                self.log_rows.append(row)
-                self.log_by_port.setdefault(port, []).append((ts, float(clipped)))
+                if is_gt:
+                    self.log_rows_gt.append(row)
+                else:
+                    self.log_rows_student.append(row)
             except Exception:
                 pass
 
@@ -384,7 +408,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.port_to_widget[port] = device_widget
         self.curves[port] = self.plot.plot(pen=pg.mkPen(color, width=2), name=label)
         self.port_to_name[port] = name
-        self.log_by_port.setdefault(port, [])
         # Error lines
         base_pen = self.curves[port].opts['pen']
         qcolor = base_pen.color()
@@ -482,8 +505,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self.logging_active:
             # Start logging
             self.logging_active = True
-            self.log_rows = []
-            self.log_by_port = {p: [] for p in self.curves.keys()}
+            self.log_rows_gt = []
+            self.log_rows_student = []
             self.btn_log.setText("Stop && Save")
             self.lbl_log_status.setText("Logging: ON")
             self.lbl_log_status.setStyleSheet("color: #0a0;")
@@ -493,118 +516,40 @@ class MainWindow(QtWidgets.QMainWindow):
             self.btn_log.setText("Start Logging")
             self.lbl_log_status.setText("Logging: OFF")
             self.lbl_log_status.setStyleSheet("color: #666;")
-            if not self.log_rows:
+            if not self.log_rows_gt and not self.log_rows_student:
                 return
             try:
-                path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save CSV", "", "CSV Files (*.csv)")
-                if not path:
-                    return
-                if not path.lower().endswith('.csv'):
-                    path += '.csv'
-                self._save_log_csv(path)
+                # Save Ground Truth file if present
+                if self.log_rows_gt:
+                    path_gt, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save Ground Truth CSV", "", "CSV Files (*.csv)")
+                    if path_gt:
+                        if not path_gt.lower().endswith('.csv'):
+                            path_gt += '.csv'
+                        self._save_log_csv(path_gt, self.log_rows_gt)
+                # Save Student file if present
+                if self.log_rows_student:
+                    path_stu, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save Student CSV", "", "CSV Files (*.csv)")
+                    if path_stu:
+                        if not path_stu.lower().endswith('.csv'):
+                            path_stu += '.csv'
+                        self._save_log_csv(path_stu, self.log_rows_student)
             except Exception as e:
                 print(f"Failed to save CSV: {e}")
 
-    def _save_log_csv(self, filepath: str):
-        # If we have two ports, produce fixed-rate samples aligned to a uniform grid
-        ports = list(self.log_by_port.keys())
-        if len(ports) >= 2 and getattr(self, 'log_rate_hz', None):
-            gt_port = None
-            student_port = None
-            for p in ports:
-                if _modem_group(p) == self.ground_truth_group:
-                    gt_port = p
-                else:
-                    student_port = p if student_port is None else student_port
-            if gt_port is None and ports:
-                gt_port = ports[0]
-            if student_port is None and len(ports) > 1:
-                student_port = [p for p in ports if p != gt_port][0]
-
-            gt_series = sorted(self.log_by_port.get(gt_port, []))  # (ts,val)
-            st_series = sorted(self.log_by_port.get(student_port, []))
-            if gt_series and st_series:
-                t0 = min(gt_series[0][0], st_series[0][0])
-                t1 = max(gt_series[-1][0], st_series[-1][0])
-                step = 1.0 / float(self.log_rate_hz)
-                tol = float(getattr(self, 'align_tolerance_ms', 40)) / 1000.0
-                # Build grid from t0 to t1 inclusive
-                num_steps = int((t1 - t0) / step) + 1
-                grid = [t0 + i * step for i in range(num_steps)]
-
-                def sample_nearest(series, t_target):
-                    # binary search nearest
-                    lo, hi = 0, len(series) - 1
-                    best_idx = 0
-                    best_dt = float('inf')
-                    while lo <= hi:
-                        mid = (lo + hi) // 2
-                        tm, _ = series[mid]
-                        dt = abs(tm - t_target)
-                        if dt < best_dt:
-                            best_dt = dt
-                            best_idx = mid
-                        if tm < t_target:
-                            lo = mid + 1
-                        elif tm > t_target:
-                            hi = mid - 1
-                        else:
-                            break
-                    if best_dt <= tol:
-                        return series[best_idx][1]
-                    return ''  # empty if no sample within tolerance
-
-                aligned_rows = []
-                for tg in grid:
-                    iso = time.strftime('%Y-%m-%dT%H:%M:%S', time.localtime(tg)) + f".{int((tg%1)*1000):03d}Z"
-                    v_gt = sample_nearest(gt_series, tg)
-                    v_st = sample_nearest(st_series, tg)
-                    def pct(v):
-                        if v == '':
-                            return ''
-                        try:
-                            v_f = float(v)
-                            vabs = abs(v_f)
-                            if vabs <= 1e-12:
-                                return ''
-                            rho = float(getattr(self, 'air_density', 1.204))
-                            dp = float(getattr(self, 'dp_error_pa', 0.62))
-                            dv_abs = dp / (rho * vabs)
-                            return f"{(dv_abs / vabs) * 100.0:.3f}"
-                        except Exception:
-                            return ''
-                    aligned_rows.append([
-                        iso,
-                        f"{tg:.6f}",
-                        f"{v_gt}" if v_gt=='' else f"{float(v_gt):.6f}",
-                        f"{v_st}" if v_st=='' else f"{float(v_st):.6f}",
-                        pct(v_gt),
-                        '',  # student error unknown
-                    ])
-
-                header = ['timestamp_iso', 'timestamp_epoch', 'ground_truth_mps', 'student_mps', 'ground_truth_err_pct', 'student_err_pct']
-                try:
-                    with open(filepath, 'w', newline='') as f:
-                        writer = csv.writer(f)
-                        writer.writerow(header)
-                        writer.writerows(aligned_rows)
-                    print(f"Saved fixed-rate aligned log to {filepath} ({len(aligned_rows)} rows @ {self.log_rate_hz} Hz)")
-                    return
-                except Exception as e:
-                    print(f"Error writing fixed-rate CSV {filepath}: {e}")
-                    # Fall through to raw format
-
-        # Raw per-sample rows if only one port or alignment failed
+    def _save_log_csv(self, filepath: str, rows):
+        # Simple approach: save all readings with their actual timestamps
+        # No forced alignment - do that in post-processing
         header = [
             'timestamp_iso', 'timestamp_epoch', 't_rel_s',
-            'device_name', 'port', 'value_raw_mps', 'value_clipped_mps', 'expected_error_pct'
+            'device_name', 'port', 'value_raw_mps', 'value_clipped_mps', 'expected_error_pct',
+            'cov_lower_mps', 'cov_upper_mps'
         ]
         try:
             with open(filepath, 'w', newline='') as f:
                 writer = csv.writer(f)
                 writer.writerow(header)
-                writer.writerows(self.log_rows)
-            print(f"Saved log to {filepath} ({len(self.log_rows)} rows)")
+                writer.writerows(rows)
+            print(f"Saved log to {filepath} ({len(rows)} rows)")
         except Exception as e:
             print(f"Error writing CSV {filepath}: {e}")
 

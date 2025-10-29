@@ -47,7 +47,7 @@ def main():
     # --- Prepare CSV ---
     with open(output_file, 'w', newline='') as csvfile:
         writer = csv.writer(csvfile)
-        writer.writerow(["timestamp", "load_cell_raw", "cup_ticks"])  # adjust columns
+        writer.writerow(["timestamp", "load_cell_raw", "cup_ticks", "cup_delta"])  # adjust columns
 
         # --- Read and Log Data ---
         print("Logging... press Ctrl+C to stop.")
