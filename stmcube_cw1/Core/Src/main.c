@@ -59,6 +59,8 @@ float calFactor = 1.0f;
 uint8_t samplingRate = 200; 		// Sampling rate
 uint8_t outputBool = 0;				// Boolean to send the code over uart
 
+// ENCODER PV
+static volatile int32_t previousCount = 0;         // last count (wrap-safe with int32_t)
 float cup = 50;
 
 
@@ -72,6 +74,15 @@ static void MX_TIM2_Init(void);
 static void MX_I2C1_Init(void);
 static void MX_TIM3_Init(void);
 /* USER CODE BEGIN PFP */
+static inline int32_t getEncoderCount(void)
+{
+  return (int32_t)__HAL_TIM_GET_COUNTER(&htim2);
+}
+
+static inline void printUART(const char* s)
+{
+  HAL_UART_Transmit(&huart2, (uint8_t*)s, (uint16_t)strlen(s), 50);
+}
 
 /* USER CODE END PFP */
 
@@ -132,7 +143,7 @@ int main(void)
   HAL_UART_Transmit(&huart2, (uint8_t*)uartBuf, strlen(uartBuf), 100);
   HAL_Delay(3000); // wait 3 seconds for user
 
-  zeroOffset = NAU7802_getAverage(&hi2c1, 320, 1000); // average 320 readings (1 second)
+  zeroOffset = NAU7802_getAverage(&hi2c1, 64, 1000); // average 320 readings (1 second)
   NAU7802_setZeroOffset(zeroOffset);
 
   sprintf(uartBuf, "Zero offset: %ld\r\n", zeroOffset);
@@ -155,11 +166,17 @@ int main(void)
 
 
   /* ----------- ENCODER VALUES INIT --------- */
-   int counterValue = 0;
-   int pastCounterValue = 0;
-   float angleValue=0;
+//   int counterValue = 0;
+//   int pastCounterValue = 0;
+//   float angleValue=0;
 
+   // Zero and start the hardware encoder
+   __HAL_TIM_SET_COUNTER(&htim2, 0);
    HAL_TIM_Encoder_Start(&htim2, TIM_CHANNEL_ALL);
+   previousCount = getEncoderCount();
+
+
+   /*----------- OUTPUT TIMER INIT ----------- */
    HAL_TIM_Base_Start_IT(&htim3);						// Init clock for outputting data
 
 
@@ -172,6 +189,10 @@ int main(void)
   while (1)
   {
 
+
+	  float weight = NAU7802_getReading(&hi2c1);
+
+
 	  // Output when outputBool set to TRUE
 	  if (outputBool == 1)
 	  {
@@ -179,17 +200,20 @@ int main(void)
 		  outputBool = 0;
 
 		  /* GET ENCODER READINGS*/
-		  counterValue = TIM2->CNT;
-		  if (counterValue != pastCounterValue)
-		  {
-			  angleValue=(360.0/4000.0)*((float)counterValue);
+//		  counterValue = TIM2->CNT;
+//		  if (counterValue != pastCounterValue)
+//		  {
+//			  angleValue=(360.0/4000.0)*((float)counterValue);
+//
+//		  }
+//		  pastCounterValue = counterValue;
 
-		  }
-		  pastCounterValue = counterValue;
+		  int32_t currentCount = getEncoderCount();
+		  int32_t deltaCount = currentCount - previousCount;   // wrap-safe with signed math
+		  previousCount = currentCount;
 
 //		  float weight = NAU7802_getWeight(&hi2c1, false, 16, 1000); // 16 samples
-		  float weight = NAU7802_getReading(&hi2c1);
-		  sprintf(uartBuf, "%.2f, %.2f \n", weight, cup);
+		  sprintf(uartBuf, "%.4f, %.4ld \n", weight, currentCount);
 		  HAL_UART_Transmit(&huart2, (uint8_t*)uartBuf, strlen(uartBuf), 100);
 
 		  cup = cup + 2;

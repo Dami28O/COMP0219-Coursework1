@@ -9,7 +9,7 @@ import sys
 def main():
 
     # --- Default Config ---
-    def_port = '/dev/tty.usbmodem21103'           # or '/dev/ttyACM0' on Linux/Mac
+    def_port = '/dev/tty.usbmodem11103'           # or '/dev/ttyACM0' on Linux/Mac
     def_baudrate = 115200
 
     # Get user input from command line (Port and baudrate are optional command line arguments)
