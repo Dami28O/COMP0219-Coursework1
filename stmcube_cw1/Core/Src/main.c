@@ -22,6 +22,7 @@
 #include "nau7802.h"
 #include <string.h>
 #include <stdbool.h>
+#include <math.h>
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -53,24 +54,27 @@ UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
 char uartBuf[64];
+
+// LOAD CELL
 int32_t zeroOffset = 0;
 double force_coeff = 8.76884498e-06;
-float force_bias = 3.92787482;			// calculated calibration factors
-float force_thing = 0.014112;
+float force_bias = 3.92787482 + 0.5315445;							// calculated calibration factors to map raw adc to force (0.5315445 from numerical calibration)
+static float v_load_coeff = 0.5 * 1.225 * 0.12 * 0.15 * 1.28;		// [rho = 1.225, A = 0.12*0.15. Cd = 1.28]
 static volatile float force = 0;
-static volatile float windSpeed_load = 0;
+static volatile float v_load = 0;
 
-uint8_t samplingRate = 200; 		// Sampling rate
-uint8_t outputBool = 0;				// Boolean to send the code over uart
-//float period = 1.0 / samplingRate;	// Period for calculating the angular velocity
+static uint8_t samplingRate = 200; 					// Sampling rate
+static volatile uint8_t outputBool = 0;				// Boolean to send the code over uart
 
 // ENCODER PV
-static volatile int32_t prevCount = 0;         // last count (wrap-safe with int32_t)
+static volatile int32_t prevCount = 0;         		// last count (wrap-safe with int32_t)
 static volatile int32_t latestCount = 0;
 static volatile int32_t latestDelta = 0;
 static volatile uint8_t sampleReady = 0;
-//static volatile uint8_t cpr = 4000;
-//static float encoder_coeff = 0.085843;
+static float encoder_coeff = 0.072351;				// Maps delta counts to linear speed
+static float encoder_bias =  0.267609;
+static volatile float v_enc = 0.0;
+
 
 
 
@@ -113,7 +117,10 @@ int main(void)
   HAL_Init();
 
   /* USER CODE BEGIN Init */
-
+  HAL_NVIC_SetPriorityGrouping(NVIC_PRIORITYGROUP_4);
+  HAL_NVIC_SetPriority(SysTick_IRQn, 15, 0);
+  HAL_NVIC_SetPriority(TIM4_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(TIM4_IRQn);
   /* USER CODE END Init */
 
   /* Configure the system clock */
@@ -204,7 +211,7 @@ int main(void)
 		  outputBool = 0;
 
 		  // Output the latest force and values from the  value
-		  sprintf(uartBuf, "%.4f, %ld \n", force, latestCount);
+		  sprintf(uartBuf, "%.4f, %.4f \n", v_load, v_enc);
 		  HAL_UART_Transmit(&huart2, (uint8_t*)uartBuf, strlen(uartBuf), 50);
 
 	  }
@@ -469,30 +476,34 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
   if (htim->Instance==TIM3) {
 	  outputBool = 1;
 
-	  // GET Load Cell readings
+	  /* -------- LOAD CELL V ESTIMATE -------- */
 	  float raw_adc = NAU7802_getReading(&hi2c1);
 	  // convert to force based on calibration factors
 	  force = force_coeff * raw_adc + force_bias;
 
-//	  windSpeed_load = (force / wind_coeff);
+	  // v^2 from the force equation
+	  v_load = (force / v_load_coeff);
 
-	  if (windSpeed_load < 0.0f) {
-		  windSpeed_load = 0.0;
+	  if (v_load < 0.0f) {
+		  v_load = 0.0;
+	  }
+	  else {
+		  v_load = sqrt(v_load);
 	  }
 
+	  /* -------- ENCODER V ESTIMATE -------- */
 	  int32_t c = (int32_t)__HAL_TIM_GET_COUNTER(&htim2);
 	  int32_t d = c - prevCount;   							// wrap-safe with signed math
-//	  double angularVelocity = (d / period)/ cpr;			// Get the angular velocity
 
 	  // convert to linear velocity
-//	  windSpeed_enc = angularVelocity * encoder_coeff;
+	  v_enc = encoder_coeff * d + encoder_bias;
 
+	  // update values
 	  prevCount = c;
-
 	  latestCount = c;
 	  latestDelta = d;
-	  sampleReady = 1;
 
+	  /* --------  V ESTIMATE -------- */
 
   }
 }

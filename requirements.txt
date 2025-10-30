@@ -3,3 +3,6 @@ matplotlib
 jupyter
 ipynb
 pyserial
+scipy
+pandas
+scikit-learn
