@@ -53,6 +53,8 @@ TIM_HandleTypeDef htim3;
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
+#define PI (3.14159265359f)   // computed from dt/(tau+dt)
+
 char uartBuf[64];
 
 // LOAD CELL
@@ -71,12 +73,19 @@ static volatile int32_t prevCount = 0;         		// last count (wrap-safe with i
 static volatile int32_t latestCount = 0;
 static volatile int32_t latestDelta = 0;
 static volatile uint8_t sampleReady = 0;
-static float encoder_coeff = 0.072351;				// Maps delta counts to linear speed
-static float encoder_bias =  0.267609;
+static float encoder_coeff = 0.069776;				// Maps delta counts to linear speed
+static float encoder_bias =  0.916947;
 static volatile float v_enc = 0.0;
 
-
-
+// Filter Params
+static float fc_cross = 1.0;
+static float dt = 1.0f / 200.0f;
+static volatile float tau;
+static volatile float alpha;
+static float LP_load = 0;
+static float LP_enc = 0;
+static float v_est = 0;
+static bool calibrationMode = false;
 
 /* USER CODE END PV */
 
@@ -194,7 +203,9 @@ int main(void)
    /*----------- OUTPUT TIMER INIT ----------- */
    HAL_TIM_Base_Start_IT(&htim3);						// Init clock for outputting data
 
-
+   // Compute filtering params
+   tau = 1.0f /(2*PI*fc_cross);
+   alpha = dt/(tau + dt);
 
 
   /* USER CODE END 2 */
@@ -211,8 +222,15 @@ int main(void)
 		  outputBool = 0;
 
 		  // Output the latest force and values from the  value
-		  sprintf(uartBuf, "%.4f, %.4f \n", v_load, v_enc);
-		  HAL_UART_Transmit(&huart2, (uint8_t*)uartBuf, strlen(uartBuf), 50);
+		  if (calibrationMode) {
+			  sprintf(uartBuf, "%.4f, %ld \n", force, latestDelta);
+			  HAL_UART_Transmit(&huart2, (uint8_t*)uartBuf, strlen(uartBuf), 50);
+
+		  }
+		  else {
+			  sprintf(uartBuf, "%.4f\n", v_est);
+			  HAL_UART_Transmit(&huart2, (uint8_t*)uartBuf, strlen(uartBuf), 50);
+		  }
 
 	  }
 
@@ -476,6 +494,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
   if (htim->Instance==TIM3) {
 	  outputBool = 1;
 
+
 	  /* -------- LOAD CELL V ESTIMATE -------- */
 	  float raw_adc = NAU7802_getReading(&hi2c1);
 	  // convert to force based on calibration factors
@@ -504,6 +523,10 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 	  latestDelta = d;
 
 	  /* --------  V ESTIMATE -------- */
+	  // LP_force[i] = LP_force[i-1] + alpha * (v_est_load[i] - LP_force[i-1])
+	  LP_load += alpha * (v_load - LP_load);
+	  LP_enc   += alpha * (v_enc   - LP_enc);
+	  v_est = (LP_enc + LP_load)/2;
 
   }
 }
