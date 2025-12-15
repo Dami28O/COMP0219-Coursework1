@@ -60,8 +60,8 @@ all: main-build
 main-build: coursework1_windsensor.elf secondary-outputs
 
 # Tool invocations
-coursework1_windsensor.elf coursework1_windsensor.map: $(OBJS) $(USER_OBJS) /Users/dogun/Library/CloudStorage/OneDrive-UniversityCollegeLondon/Robotics\ and\ AI\ MEng/Year\ 3/sensors/coursework1/stmcube_cw1/STM32F411RETX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
-	arm-none-eabi-gcc -o "coursework1_windsensor.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m4 -T"/Users/dogun/Library/CloudStorage/OneDrive-UniversityCollegeLondon/Robotics and AI MEng/Year 3/sensors/coursework1/stmcube_cw1/STM32F411RETX_FLASH.ld" --specs=nosys.specs -Wl,-Map="coursework1_windsensor.map" -Wl,--gc-sections -static --specs=nano.specs -mfpu=fpv4-sp-d16 -mfloat-abi=hard -mthumb -u _printf_float -Wl,--start-group -lc -lm -Wl,--end-group
+coursework1_windsensor.elf coursework1_windsensor.map: $(OBJS) $(USER_OBJS) /Users/dogun/Documents/UCL\ YEAR\ 3/sensors/COMP0219-Coursework1/stmcube_cw1/STM32F411RETX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
+	arm-none-eabi-gcc -o "coursework1_windsensor.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m4 -T"/Users/dogun/Documents/UCL YEAR 3/sensors/COMP0219-Coursework1/stmcube_cw1/STM32F411RETX_FLASH.ld" --specs=nosys.specs -Wl,-Map="coursework1_windsensor.map" -Wl,--gc-sections -static -u _printf_float --specs=nano.specs -mfpu=fpv4-sp-d16 -mfloat-abi=hard -mthumb -u _printf_float -Wl,--start-group -lc -lm -Wl,--end-group
 	@echo 'Finished building target: $@'
 	@echo ' '
 
